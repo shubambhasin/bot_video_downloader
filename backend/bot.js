@@ -96,7 +96,7 @@ bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
-    if (!text.startsWith('http')) {
+    if (!text?.startsWith('http')) {
         return bot.sendMessage(chatId, "⚠️ Please send a valid URL.");
     }
 
