@@ -32,7 +32,7 @@ const extractImageURLsAndTitle = async (url) => {
         if (imageUrls.length === 0) {
             $('img').each((i, el) => {
                 let imgSrc = $(el).attr('data-src') || $(el).attr('src');
-                if (imgSrc && !imgSrc.startsWith('data:')) {
+                if (imgSrc && !imgSrc?.startsWith('data:')) {
                     try {
                         const absoluteUrl = new URL(imgSrc, url).href;
                         imageUrls.push(absoluteUrl);
