@@ -1,119 +1,141 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const fs = require('fs');
+const path = require('path');
+const archiver = require('archiver');
+const { v4: uuidv4 } = require('uuid');
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
-const app = express();
-const PORT = process.env.PORT || 3009;
 
-// Store user selections
-const userSelections = {};
-
-// Extract video URL function (same as in your script)
-const extractVideoURL = async (url) => {
+// Function to extract image URLs and title from a webpage
+const extractImageURLsAndTitle = async (url) => {
     try {
-        // Fetch the HTML content of the webpage
         const { data } = await axios.get(url);
-
-        // Load the HTML content into cheerio
         const $ = cheerio.load(data);
+        let imageUrls = [];
+        let pageTitle = $('title').text().trim() || `images_${uuidv4()}`;
+        
+        $('a').each((i, el) => {
+            const anchorHref = $(el).attr('href');
+            if (anchorHref && anchorHref.match(/\.(jpeg|jpg|png|gif|webp)$/i)) {
+                try {
+                    const absoluteUrl = new URL(anchorHref, url).href;
+                    imageUrls.push(absoluteUrl);
+                } catch (error) {
+                    console.warn("Invalid image URL skipped from anchor tag:", anchorHref);
+                }
+            }
+        });
 
-        // Attempt to find the video URL by searching for the video inside the <video> tag
-        const videoUrl = $('video#mainvideo').attr('src');
+        if (imageUrls.length === 0) {
+            $('img').each((i, el) => {
+                let imgSrc = $(el).attr('data-src') || $(el).attr('src');
+                if (imgSrc && !imgSrc.startsWith('data:')) {
+                    try {
+                        const absoluteUrl = new URL(imgSrc, url).href;
+                        imageUrls.push(absoluteUrl);
+                    } catch (error) {
+                        console.warn("Invalid image URL skipped:", imgSrc);
+                    }
+                }
+            });
+        }
 
-        // if (videoUrl) {
-        //     const fullUrl = videoUrl.startsWith('//') ? 'https:' + videoUrl : videoUrl;
-        //     console.log('Video URL:', fullUrl);
-        //     return;
-        // }
-        let streamUrl = ""
-        // If not found in video tag, search inside script tags
-        $('script').each((i, el) => {
-            const scriptContent = $(el).html();
-
-            // Check if the video URL is embedded in the script
-            const videoUrlMatch = scriptContent.match(/get_video\?id=[^"]+/);
-            if (videoUrlMatch) {
-                const videoUrl = videoUrlMatch[0];
-                // console.log('ShubamBHasin', 'https:' + videoUrl);
-                streamUrl = 'https:' + videoUrl;
-
-                // Step 1: Extract everything before `').substring(1).substring(2)`
-                let substring = streamUrl.split("').substring")[0].slice(6);
-
-                // Step 2: Format it as `https://streamtape/${substring}`
-                let formattedURL = `https://streamtape.com/${substring}`;
-                console.log('ShubamBHasin', formattedURL);
-                                return formattedURL + '&stream=1';
-                            }
-                });
-                console.log("check oneeee", streamUrl)
-                let substring1 = streamUrl.split("').substring")[0].slice(6);
-
-                // Step 2: Format it as `https://streamtape/${substring}`
-                let formattedURL1 = `https://streamtape.com/${substring1}&stream=1`;
-                return formattedURL1;
-        console.log('Video URL not found.');
+        return { imageUrls, pageTitle };
     } catch (error) {
-        console.error('Error fetching the webpage:', error);
+        console.error("❌ Error fetching images:", error);
+        return { imageUrls: [], pageTitle: `images_${uuidv4()}` };
     }
 };
 
-// Handle /start command
-bot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
+// Function to download images
+const downloadImages = async (imageUrls, folderPath) => {
+    if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
 
-    const options = {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: "StreamTape", callback_data: "streamtape" }],
-                [{ text: "Other Service (Coming Soon)", callback_data: "other" }]
-            ]
+    const downloadPromises = imageUrls.map(async (imageUrl, index) => {
+        try {
+            const response = await axios({
+                url: imageUrl,
+                method: 'GET',
+                responseType: 'arraybuffer',
+                headers: { "User-Agent": "Mozilla/5.0" }
+            });
+
+            const ext = path.extname(new URL(imageUrl).pathname) || '.jpg';
+            const filePath = path.join(folderPath, `image_${index + 1}${ext}`);
+            await fs.promises.writeFile(filePath, response.data);
+            return filePath;
+        } catch (error) {
+            console.error(`❌ Failed to download image: ${imageUrl}`, error);
         }
-    };
+    });
 
-    bot.sendMessage(chatId, "📽️ Select a video service:", options);
-});
+    return Promise.all(downloadPromises);
+};
 
-// Handle button click (Service selection)
-bot.on("callback_query", (callbackQuery) => {
-    const chatId = callbackQuery.message.chat.id;
-    const service = callbackQuery.data;
+// Function to create ZIP file
+const createZip = (folderPath, zipPath) => {
+    return new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(zipPath);
+        const archive = archiver('zip', { zlib: { level: 9 } });
 
-    if (service === "other") {
-        return bot.sendMessage(chatId, "🚧 This service is not available yet.");
-    }
+        output.on('close', () => resolve(zipPath));
+        output.on('error', reject);
+        archive.on('error', reject);
 
-    userSelections[chatId] = service;
-    bot.sendMessage(chatId, "✅ Selected: StreamTape\nNow send me the video link.");
-});
+        archive.pipe(output);
+        archive.directory(folderPath, false);
+        archive.finalize().then(() => resolve(zipPath)).catch(reject);
+    });
+};
 
-// Handle video link input
-bot.on("message", async (msg) => {
+// Handle incoming messages
+bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
-    // Ignore commands
-    if (text.startsWith('/')) return;
-
-    if (!userSelections[chatId]) {
-        return bot.sendMessage(chatId, "⚠️ Please select a service first using /start.");
+    if (!text.startsWith('http')) {
+        return bot.sendMessage(chatId, "⚠️ Please send a valid URL.");
     }
 
-    bot.sendMessage(chatId, "🔍 Fetching the video link... Please wait.");
+    bot.sendMessage(chatId, "🔍 Extracting images... Please wait.");
+    const { imageUrls, pageTitle } = await extractImageURLsAndTitle(text);
 
-    const videoUrl = await extractVideoURL(text);
+    if (imageUrls.length === 0) {
+        return bot.sendMessage(chatId, "❌ No images found on the website.");
+    }
+
+    bot.sendMessage(chatId, `📥 Downloading ${imageUrls.length} images...`);
+    const folderPath = path.join(__dirname, pageTitle.replace(/[^a-zA-Z0-9-_]/g, '_'));
+    const downloadedFiles = await downloadImages(imageUrls, folderPath);
+
+    const validFiles = downloadedFiles.filter(Boolean);
+    if (validFiles.length === 0) {
+        return bot.sendMessage(chatId, "❌ Failed to download images.");
+    }
+
+    bot.sendMessage(chatId, "🗜 Creating ZIP file...");
+    const zipPath = `${folderPath}.zip`;
     
-    if (videoUrl) {
-        bot.sendMessage(chatId, `✅ Here is your download link:\n${videoUrl}`);
-    } else {
-        bot.sendMessage(chatId, "❌ Failed to fetch the video link. Please check the URL and try again.");
+    try {
+        await createZip(folderPath, zipPath);
+        
+        if (!fs.existsSync(zipPath)) {
+            throw new Error("ZIP file creation failed");
+        }
+
+        await bot.sendDocument(chatId, fs.createReadStream(zipPath), {
+            caption: "📁 Here is your ZIP file containing all images!"
+        });
+
+        fs.rmSync(folderPath, { recursive: true, force: true });
+        fs.unlinkSync(zipPath);
+    } catch (error) {
+        console.error("❌ Error processing ZIP:", error);
+        bot.sendMessage(chatId, "❌ Failed to create or send the ZIP file.");
     }
 });
 
-// Start Express server
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+console.log("🤖 Bot is running...");
